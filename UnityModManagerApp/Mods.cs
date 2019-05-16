@@ -45,6 +45,11 @@ namespace UnityModManagerNet.Installer
             if (files.Length == 0)
                 return;
 
+            //Drag and drop files on OS X are in the format /.file/id=6571367.2773272
+            if (Environment.OSVersion.Platform == PlatformID.Unix && files[0].StartsWith("/.file"))
+            {
+                files = files.Select(f => Utils.ResolveOSXFileUrl(f)).ToArray();
+            }
             SaveAndInstallZipFiles(files);
             ReloadMods();
             RefreshModList();
@@ -72,7 +77,7 @@ namespace UnityModManagerNet.Installer
                                 {
                                     Directory.CreateDirectory(dir);
                                 }
-                                var target = Path.Combine(dir, Path.GetFileName(filepath));
+                                var target = Path.Combine(dir, $"{modInfo.Id}-{modInfo.Version.Replace('.', '-')}.zip");
                                 if (filepath != target)
                                     File.Copy(filepath, target, true);
                             }
@@ -116,7 +121,7 @@ namespace UnityModManagerNet.Installer
                         catch (Exception ex)
                         {
                             Log.Print(ex.Message);
-                            Log.Print($"Can't delete old temp file '{item.Path}'.");
+                            Log.Print($"Can't delete old archive '{item.Path}'.");
                             break;
                         }
                     }
@@ -132,7 +137,7 @@ namespace UnityModManagerNet.Installer
                 return;
             }
 
-            var modsPath = Path.Combine(currentGamePath, selectedGame.ModsDirectory);
+            var modsPath = Path.Combine(gamePath, selectedGame.ModsDirectory);
             if (!Directory.Exists(modsPath))
             {
                 Log.Print("Install the UnityModManager.");
@@ -153,6 +158,10 @@ namespace UnityModManagerNet.Installer
                     Log.Print(ex.Message);
                     Log.Print($"Error when uninstalling '{name}'.");
                 }
+            }
+            else
+            {
+                Log.Print($"Directory '{modPath}' - not found.");
             }
 
             ReloadMods();
@@ -187,7 +196,7 @@ namespace UnityModManagerNet.Installer
                 return;
             }
 
-            var modsPath = Path.Combine(currentGamePath, selectedGame.ModsDirectory);
+            var modsPath = Path.Combine(gamePath, selectedGame.ModsDirectory);
             if (!Directory.Exists(modsPath))
             {
                 Log.Print("Install the UnityModManager.");
@@ -207,12 +216,26 @@ namespace UnityModManagerNet.Installer
                         File.Delete(filepath);
                     }
                 }
-                zip.ExtractAll(modsPath, ExtractExistingFileAction.OverwriteSilently);
+                foreach(var entry in zip.EntriesSorted)
+                {
+                    if (entry.IsDirectory)
+                    {
+                        Directory.CreateDirectory(Path.Combine(modsPath, entry.FileName));
+                    } else
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(modsPath, entry.FileName)));
+                        using (FileStream fs = new FileStream(Path.Combine(modsPath, entry.FileName), FileMode.Create, FileAccess.Write))
+                        {
+                            entry.Extract(fs);
+                        }                       
+                    }
+                }
                 Log.Print($"Unpacking '{Path.GetFileName(zip.Name)}' - SUCCESS.");
             }
             catch (Exception ex)
             {
                 Log.Print(ex.Message);
+                Log.Print(ex.StackTrace);
                 Log.Print($"Error when unpacking '{Path.GetFileName(zip.Name)}'.");
             }
 
@@ -230,12 +253,13 @@ namespace UnityModManagerNet.Installer
             if (selectedGame == null)
                 return;
 
-            var modsPath = Path.Combine(currentGamePath, selectedGame.ModsDirectory);
+            var modsPath = Path.Combine(gamePath, selectedGame.ModsDirectory);
             if (Directory.Exists(modsPath))
             {
                 foreach (var dir in Directory.GetDirectories(modsPath))
                 {
                     string jsonPath = Path.Combine(dir, selectedGame.ModInfo);
+                    if (!File.Exists(jsonPath)) jsonPath = Path.Combine(dir, selectedGame.ModInfo.ToLower());
                     if (File.Exists(jsonPath))
                     {
                         try
@@ -306,14 +330,17 @@ namespace UnityModManagerNet.Installer
                 string status;
                 if (modInfo.Status == ModStatus.Installed)
                 {
-                    var res = repositories.ContainsKey(selectedGame) ? repositories[selectedGame].FirstOrDefault(x => x.Id == modInfo.Id) : null;
-                    var web = !string.IsNullOrEmpty(res?.Version) ? Utils.ParseVersion(res.Version) : new Version();
+                    var release = repositories.ContainsKey(selectedGame) ? repositories[selectedGame].FirstOrDefault(x => x.Id == modInfo.Id) : null;
+                    var web = !string.IsNullOrEmpty(release?.Version) ? Utils.ParseVersion(release.Version) : new Version();
                     var local = modInfo.AvailableVersions.Keys.Max(x => x) ?? new Version();
-                    var newest = web > local ? web : local;
 
-                    if (newest > modInfo.ParsedVersion)
+                    if (local > modInfo.ParsedVersion && local >= web)
                     {
-                        status = $"Available {newest}";
+                        status = $"Update {local}";
+                    }
+                    else if (web > modInfo.ParsedVersion && web > local)
+                    {
+                        status = string.IsNullOrEmpty(release.DownloadUrl) ? $"Available {web}" : $"Download {web}";
                     }
                     else
                     {
@@ -380,7 +407,7 @@ namespace UnityModManagerNet.Installer
             {
                 foreach (ZipEntry e in zip)
                 {
-                    if (e.FileName.EndsWith(selectedGame.ModInfo))
+                    if (e.FileName.EndsWith(selectedGame.ModInfo, StringComparison.InvariantCultureIgnoreCase))
                     {
                         using (var s = new StreamReader(e.OpenReader()))
                         {
@@ -422,8 +449,25 @@ namespace UnityModManagerNet.Installer
             if (modInfo.Status == ModStatus.Installed)
             {
                 uninstallToolStripMenuItem.Visible = true;
+
+                Version inRepository = new Version();
+                if (repositories.ContainsKey(selectedGame))
+                {
+                    var release = repositories[selectedGame].FirstOrDefault(x => x.Id == modInfo.Id);
+                    if (release != null && !string.IsNullOrEmpty(release.DownloadUrl) && !string.IsNullOrEmpty(release.Version))
+                    {
+                        var ver = Utils.ParseVersion(release.Version);
+                        if (modInfo.ParsedVersion < ver)
+                        {
+                            inRepository = ver;
+                            updateToolStripMenuItem.Text = $"Update to {release.Version}";
+                            updateToolStripMenuItem.Visible = true;
+                        }
+                    }
+                }
+                
                 var newest = modInfo.AvailableVersions.Keys.Max(x => x);
-                if (newest != null && newest > modInfo.ParsedVersion)
+                if (newest != null && newest > modInfo.ParsedVersion && inRepository <= newest)
                 {
                     updateToolStripMenuItem.Text = $"Update to {newest}";
                     updateToolStripMenuItem.Visible = true;
@@ -461,7 +505,27 @@ namespace UnityModManagerNet.Installer
 
         private void updateToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            installToolStripMenuItem_Click(sender, e);
+            var modInfo = selectedMod;
+            if (modInfo)
+            {
+                if (repositories.ContainsKey(selectedGame))
+                {
+                    var release = repositories[selectedGame].FirstOrDefault(x => x.Id == modInfo.Id);
+                    if (release != null && !string.IsNullOrEmpty(release.DownloadUrl) && !string.IsNullOrEmpty(release.Version) && modInfo.AvailableVersions.All(x => x.Key < Utils.ParseVersion(release.Version)))
+                    {
+                        var downloadForm = new DownloadForm(release);
+                        var result = downloadForm.ShowDialog();
+                        if (result == DialogResult.OK)
+                        {
+                            SaveAndInstallZipFiles(new string[] { downloadForm.tempFilepath });
+                            ReloadMods();
+                            RefreshModList();
+                        }
+                        return;
+                    }
+                }
+                installToolStripMenuItem_Click(sender, e);
+            }
         }
 
         private void uninstallToolStripMenuItem_Click(object sender, EventArgs e)

@@ -1,217 +1,125 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Windows.Forms;
 using System.Xml.Serialization;
-using Newtonsoft.Json;
+using UnityEngine;
 
-namespace UnityModManagerNet.Installer
+namespace UnityModManagerNet
 {
-    public enum ModStatus { NotInstalled, Installed }
-
-    public class ModInfo : UnityModManager.ModInfo
+    public partial class UnityModManager
     {
-        [JsonIgnore]
-        public ModStatus Status;
-
-        [JsonIgnore]
-        public Dictionary<Version, string> AvailableVersions = new Dictionary<Version, string>();
-
-        [JsonIgnore]
-        public Version ParsedVersion;
-
-        [JsonIgnore]
-        public string Path;
-
-        public bool IsValid()
+        public sealed class Param
         {
-            if (string.IsNullOrEmpty(Id))
+            [Serializable]
+            public class Mod
             {
-                return false;
-            }
-            if (string.IsNullOrEmpty(DisplayName))
-            {
-                DisplayName = Id;
-            }
-            if (ParsedVersion == null)
-            {
-                ParsedVersion = Utils.ParseVersion(Version);
+                [XmlAttribute]
+                public string Id;
+                [XmlAttribute]
+                public bool Enabled = true;
             }
 
-            return true;
-        }
+            public int ShortcutKeyId = 0;
+            public int CheckUpdates = 1;
+            public int ShowOnStart = 1;
+            public float WindowWidth;
+            public float WindowHeight;
+            public float UIScale = 1f;
 
-        public bool EqualsVersion(ModInfo other)
-        {
-            return other != null && Id.Equals(other.Id) && Version.Equals(other.Version);
-        }
-    }
+            public List<Mod> ModParams = new List<Mod>();
 
-    [Serializable]
-    public class GameInfo
-    {
-        [XmlAttribute]
-        public string Name;
-        public string Folder;
-        public string ModsDirectory;
-        public string ModInfo;
-        public string AssemblyName;
-        public string PatchTarget;
+            static readonly string filepath = Path.Combine(Path.GetDirectoryName(typeof(Param).Assembly.Location), "Params.xml");
 
-        public override string ToString()
-        {
-            return Name;
-        }
-    }
-
-    public class Config
-    {
-        public const string filename = "UnityModManagerConfig.xml";
-
-        public string Repository;
-
-        [XmlElement]
-        public GameInfo[] GameInfo;
-
-        public static void Create()
-        {
-            try
-            {
-                using (var writer = new StreamWriter(filename))
-                {
-                    var config = new Config()
-                    {
-                        GameInfo = new GameInfo[]
-                        {
-                            new GameInfo
-                            {
-                                Name = "Game",
-                                Folder = "Folder",
-                                ModsDirectory = "Mods",
-                                ModInfo = "Info.json",
-                                AssemblyName = "Assembly-CSharp.dll",
-                                PatchTarget = "App.Awake"
-                            }
-                        }
-                    };
-                    var serializer = new XmlSerializer(typeof(Config));
-                    serializer.Serialize(writer, config);
-                }
-
-                Log.Print($"'{filename}' auto created.");
-            }
-            catch (Exception e)
-            {
-                Log.Print(e.Message);
-            }
-        }
-
-        public static Config Load()
-        {
-            if (File.Exists(filename))
+            public void Save()
             {
                 try
                 {
-                    using (var stream = File.OpenRead(filename))
+                    ModParams.Clear();
+                    foreach (var mod in modEntries)
                     {
-                        var serializer = new XmlSerializer(typeof(Config));
-                        return serializer.Deserialize(stream) as Config;
+                        ModParams.Add(new Mod { Id = mod.Info.Id, Enabled = mod.Enabled });
+                    }
+                    using (var writer = new StreamWriter(filepath))
+                    {
+                        var serializer = new XmlSerializer(typeof(Param));
+                        serializer.Serialize(writer, this);
                     }
                 }
                 catch (Exception e)
                 {
-                    Log.Print(e.Message);
+                    Logger.Error($"Can't write file '{filepath}'.");
+                    Debug.LogException(e);
                 }
             }
-            return null;
-        }
-    }
 
-    public class Param
-    {
-        [Serializable]
-        public class GamePath
+            public static Param Load()
+            {
+                if (File.Exists(filepath))
+                {
+                    try
+                    {
+                        using (var stream = File.OpenRead(filepath))
+                        {
+                            var serializer = new XmlSerializer(typeof(Param));
+                            var result = serializer.Deserialize(stream) as Param;
+                            
+                            return result;
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Error($"Can't read file '{filepath}'.");
+                        Debug.LogException(e);
+                    }
+                }
+                return new Param();
+            }
+
+            internal void ReadModParams()
+            {
+                foreach (var item in ModParams)
+                {
+                    var mod = FindMod(item.Id);
+                    if (mod != null)
+                    {
+                        mod.Enabled = item.Enabled;
+                    }
+                }
+            }
+        }
+
+        [XmlRoot("Config")]
+        public class GameInfo
         {
             [XmlAttribute]
             public string Name;
-            [XmlAttribute]
-            public string Path;
-        }
+            public string Folder;
+            public string ModsDirectory;
+            public string ModInfo;
+            public string EntryPoint;
+            public string StartingPoint;
+            public string UIStartingPoint;
+            public string GameExe;
+            public string GameVersionPoint;
 
-        public string LastSelectedGame;
-        public List<GamePath> GamePaths = new List<GamePath>();
+            static readonly string filepath = Path.Combine(Path.GetDirectoryName(typeof(GameInfo).Assembly.Location), "Config.xml");
 
-        public const string filename = "Params.xml";
-
-        public void SaveGamePath(string name, string path)
-        {
-            var item = GamePaths.FirstOrDefault(x => x.Name == name);
-            if (item != null)
-            {
-                item.Path = path;
-            }
-            else
-            {
-                GamePaths.Add(new GamePath { Name = name, Path = path });
-            }
-        }
-
-        public bool ExtractGamePath(string name, out string result)
-        {
-            if (GamePaths != null && GamePaths.Count > 0)
-            {
-                var item = GamePaths.FirstOrDefault(x => x.Name == name);
-                if (item != null && !string.IsNullOrEmpty(item.Path))
-                {
-                    result = item.Path;
-                    return true;
-                }
-            }
-
-            result = null;
-            return false;
-        }
-
-        public void Save()
-        {
-            var path = Path.Combine(Application.LocalUserAppDataPath, filename);
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                {
-                    var serializer = new XmlSerializer(typeof(Param));
-                    serializer.Serialize(writer, this);
-                }
-            }
-            catch (Exception e)
-            {
-                Log.Print(e.Message);
-            }
-        }
-
-        public static Param Load()
-        {
-            var path = Path.Combine(Application.LocalUserAppDataPath, filename);
-            if (File.Exists(path))
+            public static GameInfo Load()
             {
                 try
                 {
-                    using (var stream = File.OpenRead(path))
+                    using (var stream = File.OpenRead(filepath))
                     {
-                        var serializer = new XmlSerializer(typeof(Param));
-                        return serializer.Deserialize(stream) as Param;
+                        return new XmlSerializer(typeof(GameInfo)).Deserialize(stream) as GameInfo;
                     }
                 }
                 catch (Exception e)
                 {
-                    Log.Print(e.Message);
+                    Logger.Error($"Can't read file '{filepath}'.");
+                    Debug.LogException(e);
+                    return null;
                 }
             }
-            return new Param();
         }
     }
-
-    
 }
